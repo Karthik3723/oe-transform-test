@@ -74,7 +74,7 @@ pipeline {
       // Custom project variables
       COMMIT_ID = GIT_COMMIT.substring(0,7).trim().toLowerCase()
       PULL_REQUEST="pr-${env.CHANGE_ID}"
-      PROJECT_NAME = 'oetf-adaptor-service'
+      PROJECT_NAME = 'oetf-adaptor-checking-service'
       //For destination images
       DOCKER_REPO = 'oetf-adaptor-service'
       IMAGE_NAME = "${env.PROJECT_NAME}"
@@ -337,4 +337,5 @@ pipeline {
       jslNotification('unstable')
     }
   }
+
 }
