@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: '${KUBERNETES_PREFIX}-${JENKINSPREFIX}-${CONTAINERTYPE}-${APP_ACTIVE_PROFILE}'
+  labels:
+    project: '${PROJECT_NAME}'
+    branch: '${BRANCH_NAME}'
+    commit: '${COMMIT_ID}'
+    role: ${CONTAINERTYPE}
+    environment: '${APP_ACTIVE_PROFILE}'
+spec:
+  selector:
+    matchLabels:
+      project: '${PROJECT_NAME}'
+      branch: '${BRANCH_NAME}'
+      role: ${CONTAINERTYPE}
+      environment: '${APP_ACTIVE_PROFILE}'
+  replicas: 2
+  revisionHistoryLimit: 1
+  template:
+    metadata:
+      labels:
+        project: '${PROJECT_NAME}'
+        branch: '${BRANCH_NAME}'
+        commit: '${COMMIT_ID}'
+        role: ${CONTAINERTYPE}
+        environment: '${APP_ACTIVE_PROFILE}'
+    spec:
+      containers:
+        - name: ${CONTAINERTYPE}-${JENKINSPREFIX}-prod
+          image: '${DOCKER_REGISTRY_HOST}/${DOCKER_REPO}/${IMAGENAME}:${IMAGETAG}'
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8088
+              protocol: TCP
+          resources:
+            limits:
+              memory: 2048Mi
+              cpu: 250m
+            requests:
+              memory: 300Mi
+              cpu: 100m
+          env:
+          - name: APPDYNAMICS_CONTROLLER_HOST_NAME
+            value: '${APPDYNAMICS_CONTROLLER_HOST_NAME}'
+          - name: APPDYNAMICS_CONTROLLER_PORT
+            value: '${APPDYNAMICS_CONTROLLER_PORT}'
+          - name: APPDYNAMICS_CONTROLLER_SSL_ENABLED
+            value: '${APPDYNAMICS_CONTROLLER_SSL_ENABLED}'
+          - name: APPDYNAMICS_AGENT_APPLICATION_NAME
+            value: 'OE-TRANSFORM - Order Entry Message Transformation (SYSGEN788110060)'
+          - name: APPDYNAMICS_AGENT_TIER_NAME
+            value: '${PROJECT_NAME}'
+          - name: APPDYNAMICS_AGENT_ACCOUNT_NAME
+            value: '${APPDYNAMICS_AGENT_ACCOUNT_NAME}'
+          - name: APPDYNAMICS_AGENT_ACCOUNT_ACCESS_KEY
+            value: '${APPDYNAMICS_AGENT_ACCOUNT_ACCESS_KEY}'
+          - name: APPDYNAMICS_JAVA_AGENT_REUSE_NODE_NAME
+            value: '${APPDYNAMICS_JAVA_AGENT_REUSE_NODE_NAME}'
+          - name: SPRING_PROFILES_ACTIVE
+            value: prod
+          - name: KAFKA_USERNAME
+            valueFrom:
+                configMapKeyRef:
+                    name: oe-kafka-properties.prod
+                    key: oe.kafka-username
+          - name: KAFKA_PASSWORD
+            valueFrom:
+                configMapKeyRef:
+                    name: oe-kafka-properties.prod
+                    key: oe.kafka-password
+          - name: AUDIT_DB_URL
+            valueFrom:
+                configMapKeyRef:
+                    name: oe-db-properties.prod
+                    key: oe.prod.audit-url
+          - name: AUDIT_DB_USERNAME
+            valueFrom:
+                configMapKeyRef:
+                    name: oe-db-properties.prod
+                    key: oe.prod.audit-username
+          - name: AUDIT_DB_PASSWORD
+            valueFrom:
+                configMapKeyRef:
+                    name: oe-db-properties.prod
+                    key: oe.prod.audit-password
+          - name: MAIL_FROM
+            valueFrom:
+                configMapKeyRef:
+                    name: oe-kafka-properties.prod
+                    key: oe.adaptor.mail.from
+          - name: MAIL_TO
+            valueFrom:
+                configMapKeyRef:
+                    name: oe-kafka-properties.prod
+                    key: oe.adaptor.mail.to
+      imagePullSecrets:
+        - name: ${IMAGEPULLSECRET}
+---

@@ -1,0 +1,340 @@
+/*
+ Library declaration.
+  Notes:
+  identifier includes the version of the library (git tag / branch)
+  remote includes the repository git url
+  credentialsId needs to be of the type SSH key in Jenkins
+  _ at the end of the declaration loads the whole library
+
+  This section always runs in the master jenkins.
+*/
+try {
+library(
+      identifier: 'jsl-jenkins-shared-library-local@stable',
+      retriever: modernSCM(
+        [
+          $class: 'GitSCMSource',
+          remote: "/app/jenkins/git/jsl-jenkins-shared-library.git",
+          extensions: [[$class: 'WipeWorkspace']]
+        ]
+      )
+    ) _
+} catch (Exception Ex) {
+library(
+  identifier: 'jsl-jenkins-shared-library@stable',
+  retriever: modernSCM(
+    [
+      $class: 'GitSCMSource',
+      remote: "https://github.com/CenturyLink/jsl-jenkins-shared-library.git",
+      credentialsId: 'GITHUB_APP_CREDENTIALS',
+      extensions: [[$class: 'WipeWorkspace']]
+    ]
+  )
+) _
+}
+
+pipeline {
+
+    environment {
+
+      /*
+        Credentials:
+        GITHUB_TOKEN_CREDENTIALS github token, jenkins user password credential
+        GITHUB_SSH_CREDENTIALS github ssh private key, jenkins private key credential.
+        DOCKER_CREDENTIALS Docker access info, jenkins secret file credential with environment variables to export
+        KUBE_CREDENTIALS Kubernetes access info, jenkins secret file credential with environment variables to export. For PRs.
+        KUBE_CREDENTIALS_TEST Kubernetes access info, jenkins secret file credential with environment variables to export. For branches.
+        AMAZON_CREDENTIALS AWS access info, jenkins secret file credential with environment variables to export
+        SONARQUBE_CREDENTIALS Sonarqube access info, jenkins secret text
+        GCP_CREDENTIALS GCP access info, jenkins secret file credential with environment variables to export
+        JIRA_CREDENTIALS Jira access info, jenkins secret file credential with environment variables to export
+        MORPHEUS_CREDENTIALS Morpheus access info, jenkins secret text
+        MSTEAMS_CREADENTIALS MS Teams access info, jenkins secret text
+        QUALITY_GATE_CREDENTIALS Credentials to gather
+        PROJECT_MAL The MAL of the project
+      */
+      GITHUB_TOKEN_CREDENTIALS = 'GITHUB_APP_CREDENTIALS'
+      GITHUB_SSH_CREDENTIALS = 'SCMAUTO_SSH_DEVOPS_PIPELINE'
+      DOCKER_CREDENTIALS = 'nexus-secrets-file'
+      KUBE_CREDENTIALS = 'kube-adaptor-service-cred-dev'
+      KUBE_CREDENTIALS_PROD = 'kube-adaptor-service-cred-prod'
+      AMAZON_CREDENTIALS = ''
+      SONARQUBE_CREDENTIALS = 'sonarcicdent'
+      GCP_CREDENTIALS = ''
+      JIRA_CREDENTIALS = 'jira-credentials'
+      MORPHEUS_CREDENTIALS = 'morpheus-cicd-prod'
+      MSTEAMS_CREDENTIALS = 'teams-secret'
+      QUALITY_GATE_CREDENTIALS = 'qg-creds'
+      PROJECT_MAL = "OE-TRANSFORM"
+
+      //Deployment control credentialsId
+      AUTHORIZED_USERS = 'authorized_users'
+      DEPLOY_AUTH_TOKEN = 'deploy_auth_token'
+
+      // Custom project variables
+      COMMIT_ID = GIT_COMMIT.substring(0,7).trim().toLowerCase()
+      PULL_REQUEST="pr-${env.CHANGE_ID}"
+      PROJECT_NAME = 'oetf-adaptor-service'
+      //For destination images
+      DOCKER_REPO = 'oetf-adaptor-service'
+      IMAGE_NAME = "${env.PROJECT_NAME}"
+   //   IMAGE_TAG =  "${env.PULL_REQUEST}"
+      KUBE_DOCKER_SECRET_NAME = "${env.PROJECT_NAME}-${env.PULL_REQUEST}"
+      KUBE_DOCKER_SECRET_NAME_TEST = "${env.PROJECT_NAME}-${env.BRANCH_NAME}"
+      KUBE_DOCKER_SECRET_NAME_PROD = "${env.PROJECT_NAME}-${env.BRANCH_NAME}"
+    }
+    /*
+    https://www.jenkins.io/doc/book/pipeline/syntax/#agent
+    Add agent sections in stages/stage if needed.
+    */
+
+    agent {
+      label 'Docker-enabled'
+    }
+
+    options {
+      /*
+      https://www.jenkins.io/doc/book/pipeline/syntax/#options
+      */
+      timestamps ()
+      timeout(time: 1, unit: 'HOURS')
+      buildDiscarder(logRotator(numToKeepStr:'10', daysToKeepStr: '30'))
+      preserveStashes(buildCount: 10)
+      disableConcurrentBuilds()
+    }
+
+    /*
+    https://www.jenkins.io/doc/book/pipeline/syntax/#triggers
+    */
+    triggers {
+      issueCommentTrigger('.*test this please.*')
+    }
+
+    stages {
+      stage('Authorize - Prod only') {
+        when {
+          branch 'production'
+        }
+        steps {
+          script {
+            jslDeploymentControlKnob()
+
+          }
+        }
+      }
+      stage('DevSecOps'){
+        steps {
+          script {
+            /* Contract validation gate */
+            jslGitHubSecurityAlert()
+          }
+        }
+      }
+      stage('Build and Lint') {
+        agent {
+            docker {
+              image 'nexusprod.corp.intranet:4567/jsl-docker-standard-images/jdk1_21_agent:latest'
+              label 'Docker-enabled'
+            }
+          }
+        steps {
+          script {
+            jslMavenWrapper("clean install -U")
+            jslMavenWrapper("checkstyle:checkstyle")
+            archiveArtifacts artifacts: '**/target/checkstyle-result.xml', fingerprint: true
+            stash name: "LINTING", includes: "**/target/checkstyle-result.xml"
+            stash name: "TARGET", includes: "**/target/**"
+          }
+        }
+      }
+      stage('Test') {
+        stages {
+          stage('Unit Tests') {
+            agent {
+              docker {
+                image 'nexusprod.corp.intranet:4567/jsl-docker-standard-images/jdk1_21_agent:latest'
+                label 'Docker-enabled'
+            }
+          }
+            steps {
+              script {
+                /* Contract validation gate */
+                  // No tests are running
+                  // No tests => placeholder
+                  jslMavenWrapper("-f ./pom.xml clean test")
+                  jslPublishTestResults("target/surefire-reports/*.xml")
+                  stash name: "TESTS", includes: "target/surefire-reports/*.xml"
+                  stash name: "COVERAGE_REPORT", includes: "target/jacoco-ut/**"
+              }
+            }
+          }
+          stage('Coverage'){
+            steps {
+              script {
+                  /* Contract validation gate */
+                jslQualityGateCodeCoverage('./cicd/conf/sonarqube/sonar-project.properties')
+              }
+            }
+          }
+          stage('Sonarqube'){
+            agent {
+              docker {
+                image 'nexusprod.corp.intranet:4567/jsl-docker-standard-images/sonarqube_agent:latest'
+                label 'Docker-enabled'
+              }
+            }
+            steps {
+              script {
+                  unstash name: "TARGET"
+                  unstash name: "COVERAGE_REPORT"
+                  unstash name: "TESTS"
+                  /* Contract validation gate */
+                  jslSonarQubeStaticAnalysis('./cicd/conf/sonarqube/sonar-project.properties')
+              }
+            }
+          }
+          stage('Quality Gate'){
+            agent {
+              docker {
+                image 'nexusprod.corp.intranet:4567/jsl-docker-standard-images/jira_agent:latest'
+                label 'Docker-enabled'
+              }
+            }
+            steps {
+              script {
+              	   stash name: "TESTS"
+                   unstash name: "TESTS"
+                   jslQualityGate()
+              }
+            }
+          }
+        }
+      }
+      stage('Create Images') {
+        steps {
+          script {
+            unstash name: "TARGET"
+            if (env.CHANGE_ID == null) {
+             println "This is not a PR"
+              env.IMAGE_TAG = "${env.BRANCH_NAME}"
+            }
+            else {
+             println "This is a PR"
+              env.IMAGE_TAG = "${env.PULL_REQUEST}"
+            }
+            def dockerfile_path = './Dockerfile'
+          //  jslBuildAndPushToNexus(dockerfile_path)
+            env.ARGUMENTS = "--build-arg AD_VERSION=${env.APPDYNAMICS_VERSION}"
+            jslDirectBuildAndPushToNexus(dockerfile_path, env.IMAGE_TAG, env.IMAGE_NAME, env.DOCKER_REPO, env.DOCKER_CREDENTIALS, env.ARGUMENTS)
+          }
+        }
+      }
+
+      stage('Deploy') {
+        steps {
+          script {
+              env.KUBE_CREDENTIALS_TEST = 'kube-adaptor-service-cred-test'
+              def my_manifest = './sample_manifest.yml'
+              if(env.BRANCH_NAME == 'production'){
+                env.APP_ACTIVE_PROFILE = "prod"
+              }
+              else if (env.BRANCH_NAME == 'development') {
+                env.APP_ACTIVE_PROFILE = "dev"
+                env.KUBE_CREDENTIALS_TEST=env.KUBE_CREDENTIALS
+              }
+              else if (env.BRANCH_NAME == 'test1') {
+                env.APP_ACTIVE_PROFILE = "test"
+              }
+              else if (env.BRANCH_NAME == 'test2') {
+                env.APP_ACTIVE_PROFILE = "test"
+              }
+              else if (env.BRANCH_NAME == 'test3') {
+                env.APP_ACTIVE_PROFILE = "test"
+              }
+              else if (env.BRANCH_NAME == 'test4') {
+                env.APP_ACTIVE_PROFILE = "test"
+              }
+              else if (env.CHANGE_ID) {
+                env.APP_ACTIVE_PROFILE = "dev"
+                env.KUBE_CREDENTIALS_TEST=env.KUBE_CREDENTIALS
+              }
+              else {
+                env.APP_ACTIVE_PROFILE = "dev"
+                env.KUBE_CREDENTIALS_TEST=env.KUBE_CREDENTIALS
+              }
+              if (env.BRANCH_NAME == 'production') {
+                jslGenerateManifestFromTemplateWithEnv('cicd/k8s/prod_ingress.tmpl cicd/k8s/prod_service.tmpl cicd/k8s/prod_deployment.tmpl', my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}", 'master', 'production')
+                jslDeployK8sManifestWithEnv(my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}", 'master', 'production')
+              }
+              else if (env.BRANCH_NAME == 'test1') {
+                jslGenerateManifestFromTemplateWithEnv('cicd/k8s/test1_ingress.tmpl cicd/k8s/test1_service.tmpl cicd/k8s/test1_deployment.tmpl', my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+                jslDeployK8sManifestWithEnv(my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+              }
+              else if (env.BRANCH_NAME == 'test2') {
+                jslGenerateManifestFromTemplateWithEnv('cicd/k8s/test2_ingress.tmpl cicd/k8s/test2_service.tmpl cicd/k8s/test2_deployment.tmpl', my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+                jslDeployK8sManifestWithEnv(my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+              }
+              else if (env.BRANCH_NAME == 'test3') {
+                jslGenerateManifestFromTemplateWithEnv('cicd/k8s/test3_ingress.tmpl cicd/k8s/test3_service.tmpl cicd/k8s/test3_deployment.tmpl', my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+                jslDeployK8sManifestWithEnv(my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+              }
+              else if (env.BRANCH_NAME == 'test4') {
+                jslGenerateManifestFromTemplateWithEnv('cicd/k8s/test4_ingress.tmpl cicd/k8s/test4_service.tmpl cicd/k8s/test4_deployment.tmpl', my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+                jslDeployK8sManifestWithEnv(my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+              }
+              else {
+                jslGenerateManifestFromTemplateWithEnv('cicd/k8s/dev1_ingress.tmpl cicd/k8s/dev1_service.tmpl cicd/k8s/dev1_deployment.tmpl', my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+                jslDeployK8sManifestWithEnv(my_manifest, 'java', "${env.APP_ACTIVE_PROFILE}")
+              }
+              stash name: "INGRESS", includes: "ingress_info.txt"
+              jslCleanPath(my_manifest)
+              /*Single endpoint.*/
+              def endpoint = sh(script: "cat ingress_info.txt", returnStdout: true).trim()
+              jslGitHubMessage("The endpoint is available at: ${endpoint}")
+          }
+        }
+      }
+
+      stage('E2E Testing') {
+        steps {
+          script {
+            println('placeholder')
+          }
+        }
+      }
+      stage('Adoption Stats') {
+        agent {
+          docker {
+            image 'nexusprod.corp.intranet:4567/jsl-docker-standard-images/jira_agent:latest'
+            label 'Docker-enabled'
+          }
+        }
+         steps {
+           script{
+                unstash name: "TESTS"
+            /* Contract validation gate */
+            jslAdoptionMain('target/surefire-reports/*.xml')
+          }
+         }
+      }
+    }
+
+  post {
+    /*
+    https://www.jenkins.io/doc/book/pipeline/syntax/#post
+
+    Always post somewhere the watermark:
+  - md5sum of Jenkinsfile
+  - Output of the Jenkinsfile checker output
+    */
+    success {
+      jslNotification('success')
+    }
+    failure {
+      jslNotification('failure')
+    }
+    unstable {
+      jslNotification('unstable')
+    }
+  }
+}
